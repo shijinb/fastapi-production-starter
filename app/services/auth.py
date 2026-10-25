@@ -3,6 +3,11 @@
 Refresh tokens are single-use. Each use issues a new token in the same "family" and revokes the old
 one. If an already-used token is presented again, it was probably stolen, so every token in its
 family is revoked and the user has to log in again (OAuth 2.0 Security BCP, refresh token rotation).
+
+Exception: a token rotated within the last REFRESH_REUSE_GRACE_SECONDS (default 10) may be used
+again while its family is still active. Browsers and server-rendered frontends routinely send
+several requests at once with the same cookie; without a grace window the second request would
+look like theft and log the user out.
 """
 
 import logging
@@ -11,7 +16,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,7 +31,7 @@ from app.core.security import (
     password_needs_rehash,
     verify_password,
 )
-from app.models import Organization, RefreshToken, Role, User
+from app.models import Organization, RefreshToken, RevokeReason, Role, User
 from app.schemas import RegisterRequest, TokenResponse
 from app.services import audit
 
@@ -117,25 +122,48 @@ async def refresh(session: AsyncSession, settings: Settings, refresh_token: str)
 
     now = datetime.now(UTC)
     if stored.revoked_at is not None:
-        await revoke_family(session, stored.family_id, now)
-        # The revocation must persist even though this request fails.
-        await session.commit()
-        logger.warning("Refresh token reuse detected; token family revoked", extra={"user_id": str(stored.user_id)})
-        raise AuthenticationError("Refresh token has already been used")
+        if await _within_reuse_grace(session, settings, stored, now):
+            # A client sent several requests at once with the same token (e.g. parallel page loads),
+            # and one of them already rotated it. Give this one its own token in the same family.
+            logger.info("Refresh token reused within grace period", extra={"user_id": str(stored.user_id)})
+        else:
+            await revoke_family(session, stored.family_id, RevokeReason.REUSE, now)
+            # The revocation must persist even though this request fails.
+            await session.commit()
+            logger.warning("Refresh token reuse detected; token family revoked", extra={"user_id": str(stored.user_id)})
+            raise AuthenticationError("Refresh token has already been used")
 
     user = await session.get(User, stored.user_id)
     if user is None or not user.is_active:
         raise AuthenticationError("This account is disabled")
 
-    stored.revoked_at = now
+    if stored.revoked_at is None:
+        stored.revoked_at = now
+        stored.revoke_reason = RevokeReason.ROTATED
     return await _issue_tokens(session, settings, user, family_id=stored.family_id)
 
 
-async def revoke_family(session: AsyncSession, family_id: uuid.UUID, now: datetime | None = None) -> None:
+async def _within_reuse_grace(session: AsyncSession, settings: Settings, stored: RefreshToken, now: datetime) -> bool:
+    """True only for a token that was *rotated* moments ago in a family that is still active.
+
+    Tokens revoked by logout, deactivation or reuse detection never qualify, and neither does a
+    rotated token once its family has been revoked.
+    """
+    if settings.refresh_reuse_grace_seconds <= 0 or stored.revoke_reason != RevokeReason.ROTATED or stored.revoked_at is None:
+        return False
+    if (now - stored.revoked_at).total_seconds() > settings.refresh_reuse_grace_seconds:
+        return False
+    active_in_family = await session.scalar(
+        select(func.count()).where(RefreshToken.family_id == stored.family_id, RefreshToken.revoked_at.is_(None))
+    )
+    return bool(active_in_family)
+
+
+async def revoke_family(session: AsyncSession, family_id: uuid.UUID, reason: RevokeReason, now: datetime | None = None) -> None:
     await session.execute(
         update(RefreshToken)
         .where(RefreshToken.family_id == family_id, RefreshToken.revoked_at.is_(None))
-        .values(revoked_at=now or datetime.now(UTC))
+        .values(revoked_at=now or datetime.now(UTC), revoke_reason=reason)
     )
 
 
@@ -143,4 +171,4 @@ async def logout(session: AsyncSession, settings: Settings, refresh_token: str) 
     """Revokes the session the refresh token belongs to. Unknown or expired tokens are ignored."""
     stored = await session.scalar(select(RefreshToken).where(RefreshToken.token_hash == fingerprint(refresh_token)))
     if stored is not None:
-        await revoke_family(session, stored.family_id)
+        await revoke_family(session, stored.family_id, RevokeReason.LOGOUT)

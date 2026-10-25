@@ -1,5 +1,11 @@
-from httpx import AsyncClient
+import asyncio
 
+import pytest
+from httpx import AsyncClient
+from sqlalchemy import text
+
+from app.core.config import Settings
+from app.db.session import create_engine
 from tests.conftest import add_user, bearer, register
 
 PASSWORD = "correct horse battery"
@@ -66,6 +72,7 @@ async def test_refresh_rotates_tokens(client: AsyncClient) -> None:
     assert (await client.get("/api/v1/auth/me", headers=bearer(second))).status_code == 200
 
 
+@pytest.mark.settings(refresh_reuse_grace_seconds=0)
 async def test_refresh_token_reuse_revokes_the_whole_session(client: AsyncClient) -> None:
     first = await register(client)
     second = (await client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})).json()
@@ -76,6 +83,44 @@ async def test_refresh_token_reuse_revokes_the_whole_session(client: AsyncClient
 
     after = await client.post("/api/v1/auth/refresh", json={"refresh_token": second["refresh_token"]})
     assert after.status_code == 401
+
+
+async def test_concurrent_refreshes_with_the_same_token_all_succeed(client: AsyncClient) -> None:
+    # A browser loading a page fires several requests at once with the same refresh cookie.
+    tokens = await register(client)
+    results = await asyncio.gather(
+        *(client.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]}) for _ in range(4))
+    )
+    assert [r.status_code for r in results] == [200, 200, 200, 200]
+    # Every new token works, and they are all distinct.
+    new_tokens = [r.json()["refresh_token"] for r in results]
+    assert len(set(new_tokens)) == 4
+    assert (await client.post("/api/v1/auth/refresh", json={"refresh_token": new_tokens[-1]})).status_code == 200
+
+
+async def test_reuse_after_the_grace_period_is_treated_as_theft(client: AsyncClient, settings: Settings) -> None:
+    first = await register(client)
+    second = (await client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})).json()
+
+    # Pretend the rotation happened longer ago than the grace window.
+    engine = create_engine(settings)
+    async with engine.begin() as connection:
+        await connection.execute(text("UPDATE refresh_tokens SET revoked_at = now() - interval '1 minute' WHERE revoke_reason = 'rotated'"))
+    await engine.dispose()
+
+    reuse = await client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
+    assert reuse.status_code == 401
+    assert (await client.post("/api/v1/auth/refresh", json={"refresh_token": second["refresh_token"]})).status_code == 401
+
+
+async def test_grace_period_never_revives_a_logged_out_session(client: AsyncClient) -> None:
+    first = await register(client)
+    second = (await client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})).json()
+    await client.post("/api/v1/auth/logout", json={"refresh_token": second["refresh_token"]})
+
+    # The first token was rotated seconds ago, but its family is now logged out.
+    reuse = await client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
+    assert reuse.status_code == 401
 
 
 async def test_logout_revokes_refresh_token(client: AsyncClient) -> None:

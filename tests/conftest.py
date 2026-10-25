@@ -51,13 +51,17 @@ def migrated_database() -> str:
 
 
 @pytest.fixture
-def settings(migrated_database: str) -> Settings:
+def settings(migrated_database: str, request: pytest.FixtureRequest) -> Settings:
+    """Test settings; override fields per test with @pytest.mark.settings(field=value)."""
+    marker = request.node.get_closest_marker("settings")
+    overrides: dict[str, Any] = dict(marker.kwargs) if marker else {}
     return Settings(
         app_env="test",
         database_url=migrated_database,
         jwt_secret="test-secret-that-is-at-least-32-characters-long",  # type: ignore[arg-type]
         log_json=False,
         log_level="WARNING",
+        **overrides,
     )
 
 

@@ -40,6 +40,13 @@ class CustomerStatus(enum.StrEnum):
     CHURNED = "churned"
 
 
+class RevokeReason(enum.StrEnum):
+    ROTATED = "rotated"  # replaced by a newer token in the same family (normal refresh)
+    LOGOUT = "logout"
+    REUSE = "reuse"  # an already-used token was presented: the family is treated as compromised
+    DEACTIVATED = "deactivated"
+
+
 class Organization(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "organizations"
 
@@ -74,6 +81,7 @@ class RefreshToken(UUIDPrimaryKey, Base):
     family_id: Mapped[uuid.UUID] = mapped_column(index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_reason: Mapped[RevokeReason | None] = mapped_column(_enum(RevokeReason, "revoke_reason"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -114,4 +122,4 @@ class AuditEvent(UUIDPrimaryKey, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-__all__ = ["AuditEvent", "Customer", "CustomerStatus", "Organization", "RefreshToken", "Role", "User"]
+__all__ = ["AuditEvent", "Customer", "CustomerStatus", "Organization", "RefreshToken", "RevokeReason", "Role", "User"]

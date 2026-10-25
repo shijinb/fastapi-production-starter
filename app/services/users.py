@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError, PermissionDeniedError
 from app.core.security import hash_password
-from app.models import RefreshToken, Role, User
+from app.models import RefreshToken, RevokeReason, Role, User
 from app.schemas import UserCreate, UserUpdate
 from app.services import audit
 
@@ -69,7 +69,9 @@ async def update_user(session: AsyncSession, actor: User, user_id: uuid.UUID, da
     if data.is_active is False:
         # Deactivation ends existing sessions: refresh tokens stop working immediately.
         await session.execute(
-            update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)).values(revoked_at=func.now())
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=func.now(), revoke_reason=RevokeReason.DEACTIVATED)
         )
 
     if delta := audit.diff(before, changes):

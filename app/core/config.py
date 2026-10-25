@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     access_token_ttl_minutes: int = Field(default=15, ge=1, le=24 * 60)
     refresh_token_ttl_days: int = Field(default=14, ge=1, le=90)
+    # Seconds during which a just-rotated refresh token may be reused (concurrent requests). 0 disables.
+    refresh_reuse_grace_seconds: int = Field(default=10, ge=0, le=60)
 
     # NoDecode: read the raw env value so split_origins can accept a comma-separated list, not only JSON.
     cors_origins: Annotated[list[str], NoDecode] = []

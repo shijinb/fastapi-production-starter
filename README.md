@@ -35,7 +35,7 @@ The example domain is a small CRM (organizations, users, customers), chosen so t
 | Area | What's included |
 |---|---|
 | **Auth** | Registration (creates an organization and its owner), login, Argon2id password hashing with automatic rehash, 15-minute access tokens, 14-day refresh tokens stored only as SHA-256 digests |
-| **Session security** | Refresh tokens are single-use and rotated on every refresh; presenting a used token revokes the whole session ("token family"); logout and user deactivation revoke sessions immediately |
+| **Session security** | Refresh tokens are single-use and rotated on every refresh; presenting a used token revokes the whole session ("token family"), with a short grace window for concurrent requests; logout and user deactivation revoke sessions immediately |
 | **Multi-tenancy** | Every tenant-owned row has `organization_id`; every query is scoped in the service layer; other tenants' records return 404, so IDs cannot be probed |
 | **RBAC** | `owner` > `admin` > `member`; admins manage users and delete customers; the owner cannot be modified via the API; users cannot demote or disable themselves |
 | **Example resource** | Customers: create, read, partial update, delete; search across name, e-mail and company (LIKE wildcards escaped); multi-status filter; sort; pagination; dashboard statistics |
@@ -71,7 +71,7 @@ app/
   api/routes/          health, auth, users, customers, audit-events
 alembic/               migrations (async env)
 scripts/seed.py        synthetic demo data
-tests/                 30 tests against PostgreSQL
+tests/                 34 tests against PostgreSQL
 ```
 
 **Design choices**
@@ -147,8 +147,10 @@ sequenceDiagram
     C->>A: POST /auth/refresh (R1)
     A->>DB: revoke R1, issue R2 in family F
     A-->>C: new access + R2
-    Note over C,A: If R1 is ever presented again,<br/>every token in family F is revoked
+    Note over C,A: If R1 is presented again after the grace window,<br/>every token in family F is revoked
 ```
+
+**Concurrent refreshes.** Browsers and server-rendered frontends often send several requests at once with the same refresh cookie. Strict single-use rotation would treat every request after the first as theft and log the user out. A token that was *rotated* (not logged out or revoked) within the last `REFRESH_REUSE_GRACE_SECONDS` (default 10) can therefore be used again while its family is still active; each such request gets its own new token. Tokens record why they were revoked (`rotated`, `logout`, `reuse`, `deactivated`), so logout and theft detection are never bypassed. Set the value to `0` for strict rotation.
 
 - Tokens are HS256 JWTs with `sub` (user), `org` (organization), `type` (`access`/`refresh`), `jti`, `iat` and `exp`; the type is checked, so a refresh token cannot be used as an access token.
 - On every request the user is reloaded: deactivated users, or users whose organization no longer matches the token, are rejected immediately, not when the token expires.
@@ -184,6 +186,7 @@ Environment variables (or `.env`); see [`.env.example`](.env.example).
 | `JWT_ALGORITHM` | `HS256` | `HS256`, `HS384` or `HS512` |
 | `ACCESS_TOKEN_TTL_MINUTES` | `15` | 1–1440 |
 | `REFRESH_TOKEN_TTL_DAYS` | `14` | 1–90 |
+| `REFRESH_REUSE_GRACE_SECONDS` | `10` | 0–60; `0` = strict single use (see above) |
 | `CORS_ORIGINS` | none | Comma-separated or JSON list; CORS is off when empty |
 | `LOG_LEVEL` / `LOG_JSON` | `INFO` / `true` | Text logs with `LOG_JSON=false` |
 | `DOCS_ENABLED` | `true` | Set `false` to hide `/docs`, `/redoc`, `/openapi.json` |
@@ -194,7 +197,7 @@ Environment variables (or `.env`); see [`.env.example`](.env.example).
 |---|---|
 | `organizations` | Tenants |
 | `users` | Belongs to one organization; e-mail unique across the service; role enum |
-| `refresh_tokens` | SHA-256 digest, family ID, expiry, revocation time |
+| `refresh_tokens` | SHA-256 digest, family ID, expiry, revocation time and reason |
 | `customers` | Tenant-owned; unique `(organization_id, email)`; `lifetime_value >= 0` check; indexes for status and date filters |
 | `audit_events` | Append-only; indexed by `(organization_id, created_at)` and `(organization_id, entity_id)` |
 
@@ -214,14 +217,14 @@ pytest            # creates the database if missing, migrates it with Alembic, t
 make lint         # ruff format/check, mypy --strict
 ```
 
-30 tests cover:
-- **Auth:** registration, duplicate and case-insensitive e-mail, login messages that don't reveal accounts, token type checks, rotation, reuse detection revoking the session, logout, immediate effect of deactivation.
+34 tests cover:
+- **Auth:** registration, duplicate and case-insensitive e-mail, login messages that don't reveal accounts, token type checks, rotation, reuse detection revoking the session, concurrent refreshes, the grace window never reviving a logged-out session, logout, immediate effect of deactivation.
 - **Tenancy:** another organization's data is invisible to list, get, update, delete, stats and users; the same customer e-mail is allowed in different tenants.
 - **Roles:** member and admin rules, owner protection, no self-demotion.
 - **Customers:** validation, normalisation, search with literal `%`/`_`, filters, sorting, pagination, partial updates, stats.
 - **Platform:** audit trail content and access, problem-details format, request-ID handling, health and readiness, OpenAPI coverage, production config guards.
 
-**Verification status (2026-10-25):** the 30 tests, `ruff` and `mypy --strict` pass locally on Python 3.12 with PostgreSQL 15. Migrations were run up, down and up again, and `alembic check` reports no drift. The server was started with uvicorn and exercised with real requests: login, stats, search and docs. In GitHub Actions (CI run #1), the same checks passed against PostgreSQL 16, and the Docker job built the image, started the compose stack, seeded data, logged in and queried the API.
+**Verification status (2026-10-25):** the 34 tests, `ruff` and `mypy --strict` pass locally on Python 3.12 with PostgreSQL 15. Both migrations were run up, down and up again (0002 on a database that already held data), and `alembic check` reports no drift. The server was started with uvicorn and exercised with real requests: login, stats, search and docs. In GitHub Actions (CI run #1), the same checks passed against PostgreSQL 16, and the Docker job built the image, started the compose stack, seeded data, logged in and queried the API.
 
 ## Deployment notes
 
