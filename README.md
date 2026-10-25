@@ -221,7 +221,7 @@ make lint         # ruff format/check, mypy --strict
 - **Customers:** validation, normalisation, search with literal `%`/`_`, filters, sorting, pagination, partial updates, stats.
 - **Platform:** audit trail content and access, problem-details format, request-ID handling, health and readiness, OpenAPI coverage, production config guards.
 
-**Verification status (2026-10-25):** the 30 tests, `ruff` and `mypy --strict` pass locally on Python 3.12 with PostgreSQL 15. Migrations were run up, down and up again, and `alembic check` reports no drift. The server was started with uvicorn and exercised with real requests: login, stats, search and docs. The Docker image and docker-compose stack are built and smoke-tested in CI (Docker was not available on the development machine).
+**Verification status (2026-10-25):** the 30 tests, `ruff` and `mypy --strict` pass locally on Python 3.12 with PostgreSQL 15. Migrations were run up, down and up again, and `alembic check` reports no drift. The server was started with uvicorn and exercised with real requests: login, stats, search and docs. In GitHub Actions (CI run #1), the same checks passed against PostgreSQL 16, and the Docker job built the image, started the compose stack, seeded data, logged in and queried the API.
 
 ## Deployment notes
 
