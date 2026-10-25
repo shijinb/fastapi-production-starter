@@ -33,12 +33,22 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class TextFormatter(logging.Formatter):
+    """Readable single-line logs for local development, including `extra=` fields as key=value."""
+
+    def __init__(self) -> None:
+        super().__init__("%(asctime)s %(levelname)-7s [%(request_id)s] %(name)s: %(message)s")
+
+    def format(self, record: logging.LogRecord) -> str:
+        line = super().format(record)
+        extra = {key: value for key, value in vars(record).items() if key not in JsonFormatter._standard}
+        return line + "".join(f" {key}={value}" for key, value in extra.items())
+
+
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.addFilter(RequestIdFilter())
-    handler.setFormatter(
-        JsonFormatter() if json_output else logging.Formatter("%(asctime)s %(levelname)-7s [%(request_id)s] %(name)s: %(message)s")
-    )
+    handler.setFormatter(JsonFormatter() if json_output else TextFormatter())
 
     root = logging.getLogger()
     root.handlers = [handler]
